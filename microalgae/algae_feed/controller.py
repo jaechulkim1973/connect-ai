@@ -90,6 +90,7 @@ class FeedController:
         self.last_hour: Optional[float] = None
         self.glucose_locked = False
         self._last_dose_g_l = 0.0
+        self.pump_fault_count = 0
         # 누적 통계
         self.totals = {"glucose_g": 0.0, "n_g": 0.0, "p_g": 0.0, "harvest_l": 0.0, "co2_on_min": 0.0}
 
@@ -122,6 +123,10 @@ class FeedController:
         elif z.temp_c < c.cool_on_c - c.hysteresis_c:
             self.cooler_on = False
         a.heater_on, a.cooler_on = self.heater_on, self.cooler_on
+        if z.temp_c < c.heat_on_c - 3.0 and self.heater_on:
+            a.alarms.append("온도 저하: 가온 중인데 설정보다 3°C 이상 낮음 (히터·순환 점검)")
+        if z.temp_c > c.cool_on_c + 3.0:
+            a.alarms.append("온도 과열: 냉각 한계 초과 (차광·증발냉각 점검)")
 
         # ---- 2. CO2 pH-stat ----
         if z.ph > c.ph_setpoint + c.ph_band_hi:
@@ -138,7 +143,16 @@ class FeedController:
         q = self._q_glucose(z.biomass_g_l, z.temp_c, light)
         if z.glucose_g_l is not None:
             # 오염 감시: 측정된 소비속도 vs 예측
-            if self.last_glucose_meas is not None and dt_h > 0:
+            if (self.last_glucose_meas is not None and self._last_dose_g_l > 0.05
+                    and z.glucose_g_l < self.last_glucose_meas + 0.3 * self._last_dose_g_l):
+                # 투입했는데 당 농도가 오르지 않음 → 펌프·배관 이상 (오염으로 오인하지 않음)
+                self.pump_fault_count += 1
+                if self.pump_fault_count == 3:
+                    a.alarms.append("포도당 펌프 이상 의심: 투입 명령이 농도에 반영되지 않음")
+                self.last_glucose_meas = None
+            elif self._last_dose_g_l > 0.05:
+                self.pump_fault_count = 0
+            if self.last_glucose_meas is not None and dt_h > 0 and not self.glucose_locked:
                 consumed = (self.last_glucose_meas + self._last_dose_g_l - z.glucose_g_l) / dt_h
                 if q > 0 and consumed > c.contamination_ratio * q and consumed > 0.05:
                     self.glucose_locked = True
@@ -201,6 +215,7 @@ class FeedController:
             # 신선 배지로 보충 → 농도 희석 반영 (당·영양염도 희석)
             frac = c.x_opt / z.biomass_g_l
             self.glucose_est *= frac
+            self.last_glucose_meas = None   # 희석으로 당이 줄어든 것을 소비로 오인하지 않도록
             self.n_est = self.n_est * frac + c.n_target_mg_l * (1 - frac)
             self.p_est = self.p_est * frac + c.p_target_mg_l * (1 - frac)
             x_g = c.x_opt * z.volume_l
