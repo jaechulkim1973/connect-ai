@@ -19,6 +19,7 @@ from algae_feed.controller import ControllerConfig, daily_glucose_budget
 from algae_feed.model import sizing
 from algae_feed.optimizer import best, enumerate_scenarios, label
 from algae_feed.sim import simulate_day
+from algae_feed import robot as rb
 
 UREA_N = 0.466
 KH2PO4_P = 0.228
@@ -141,6 +142,40 @@ def main() -> None:
         p(f"| {MON[mi]} | {budget / 1000:.1f} kg | {d.photo_g / 1000:.2f} kg | {d.mixo_g / 1000:.2f} kg "
           f"| {d.glucose_fed_g / 1000:.1f} kg | {d.co2_on_min:.0f} 분 | {d.harvest_l:,.0f} L "
           f"| {d.mean_do:.0f}/{d.max_do:.0f}% | {d.min_ph:.2f}~{d.max_ph:.2f} | {len(d.alarms)} |")
+
+    # AI 자동수거 로봇 최적 설계
+    p("\n## 6. AI 자동수거 로봇 최적 설계\n")
+    p("수거 방식 × 패널 길이(2·4·6·8 m) × 열 길이(50·100 m)를 전수 평가하고, 방식마다 가장 싼 배치를 골랐습니다. "
+      "인건비는 수확·점검·필름교체 작업시간으로 직접 계산합니다(위 1~5장은 인건비를 m²당 일괄값으로 단순화).\n")
+    p("| 순위 | 수거 방식 | 패널/열 길이 | 배양기 m² | 돔 m² | 로봇 | 하루 수확 | 가동률 | 총 CAPEX | 원가 $/kg |")
+    p("|---|---|---|---|---|---|---|---|---|---|")
+    designs = rb.optimize(top, a.tpy)
+    for i, d in enumerate(designs, 1):
+        p(f"| {i} | {d.system.name} | {d.layout.panel_len_m:.0f} m / {d.layout.row_len_m:.0f} m | {d.reactor_m2:,.0f} "
+          f"| {d.dome_m2:,.0f} | {d.robots}대 | {d.harvests_per_day}회 | {d.utilization:.0%} "
+          f"| {fmt_usd(d.capex_total)} | **${d.cost_per_kg:.2f}** |")
+    win = designs[0]
+    manual = [d for d in designs if d.system.key == "manual"][0]
+    p(f"\n**선정: {win.system.name}** — {win.system.note}")
+    p(f"- 패널 {win.panels:,}개 ({win.layout.panel_len_m:.0f} m), {win.rows}열, 로봇 {win.robots}대, 레일 {win.rail_m:,.0f} m, "
+      f"패널당 사이클 {win.cycle_s:.0f}초, 하루 {win.harvests_per_day}회 부분수확")
+    p(f"- 수작업 대비: 원가 ${manual.cost_per_kg:.2f} → **${win.cost_per_kg:.2f}/kg** "
+      f"({1 - win.cost_per_kg / manual.cost_per_kg:.0%} 절감), 돔 면적 {manual.dome_m2:,.0f} → {win.dome_m2:,.0f} m² "
+      f"({1 - win.dome_m2 / manual.dome_m2:.0%} 감소)")
+    p("\n| CAPEX 항목 | 금액 |")
+    p("|---|---|")
+    for k, v in win.capex.items():
+        p(f"| {k} | {fmt_usd(v)} |")
+    p(f"| **합계** | **{fmt_usd(win.capex_total)}** |")
+    if win.robots:
+        p("\n**AI 스케줄러 1일 검증 (로봇 1대 담당 구역, 패널 1개를 일부러 오염 상태로 둠)**\n")
+        p("| 월 | 패널 수 | 수확 횟수 | 최적농도 평균 이탈 | 로봇 가동률 | 격리 패널 |")
+        p("|---|---|---|---|---|---|")
+        for mi in (0, 6):
+            panels, sch = rb.build_bay(win, mi, contaminated=(5,))
+            res = sch.simulate_day(panels, 1)
+            p(f"| {MON[mi]} | {len(panels)} | {res['harvests']} | {res['mean_density_dev']:.1%} "
+              f"| {res['robot_utilization']:.0%} | {res['quarantined']} |")
 
     report = "\n".join(lines)
     with open(os.path.join(a.out, "report.md"), "w", encoding="utf-8") as f:
